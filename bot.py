@@ -1,6 +1,6 @@
 import os
 import logging
-from anthropic import Anthropic
+import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -11,11 +11,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
-SYSTEM_PROMPT = """You are a sharp, warm personal assistant for {name}. Your job is to help them stay organised, focused, and on top of their day.
+SYSTEM_PROMPT = """You are a sharp, warm personal assistant. Your job is to help the user stay organised, focused, and on top of their day.
 
 You help with:
 - Planning and structuring their day into a clear schedule
@@ -33,6 +33,7 @@ Your style:
 
 You have memory within this conversation — refer back to tasks or plans mentioned earlier when relevant."""
 
+# Per-user conversation history (Gemini format)
 conversation_histories: dict[int, list] = {}
 
 
@@ -47,7 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = user.first_name or "there"
     conversation_histories[user.id] = []
     await update.message.reply_text(
-        f"Hey {name}! 👋 I'm your personal assistant, powered by Claude.\n\n"
+        f"Hey {name}! 👋 I'm your personal assistant, powered by Gemini.\n\n"
         f"I can help you:\n"
         f"• Plan your day 📅\n"
         f"• Track and organise your tasks ✅\n"
@@ -75,32 +76,33 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
-    user_name = user.first_name or "there"
     message_text = update.message.text
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     history = get_history(user_id)
-    history.append({"role": "user", "content": message_text})
-
-    if len(history) > 30:
-        history = history[-30:]
-        conversation_histories[user_id] = history
 
     try:
-        response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1024,
-            system=SYSTEM_PROMPT.format(name=user_name),
-            messages=history,
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT
         )
-        assistant_message = response.content[0].text
+        chat = model.start_chat(history=history)
+        response = chat.send_message(message_text)
+        assistant_message = response.text
+
+        # Save updated history (Gemini format uses "user" and "model")
+        history.append({"role": "user", "parts": [message_text]})
+        history.append({"role": "model", "parts": [assistant_message]})
+
+        # Keep last 30 exchanges
+        if len(history) > 60:
+            conversation_histories[user_id] = history[-60:]
+
     except Exception as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error(f"Gemini API error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
         return
-
-    history.append({"role": "assistant", "content": assistant_message})
 
     if len(assistant_message) <= 4096:
         await update.message.reply_text(assistant_message)
@@ -112,8 +114,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     if not TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN environment variable is not set")
-    if not ANTHROPIC_API_KEY:
-        raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY environment variable is not set")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
