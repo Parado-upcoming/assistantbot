@@ -42,6 +42,32 @@ def get_history(user_id: int) -> list:
     return conversation_histories[user_id]
 
 
+async def ask_ai(user_id: int, user_name: str, message_text: str) -> str:
+    history = get_history(user_id)
+    history.append({"role": "user", "content": message_text})
+
+    if len(history) > 30:
+        history = history[-30:]
+        conversation_histories[user_id] = history
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "system", "content": SYSTEM_PROMPT.format(name=user_name)}] + history,
+        max_tokens=1024,
+    )
+    assistant_message = response.choices[0].message.content
+    history.append({"role": "assistant", "content": assistant_message})
+    return assistant_message
+
+
+async def send_reply(update: Update, text: str) -> None:
+    if len(text) <= 4096:
+        await update.message.reply_text(text)
+    else:
+        for i in range(0, len(text), 4096):
+            await update.message.reply_text(text[i:i + 4096])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     name = user.first_name or "there"
@@ -53,7 +79,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Track and organise your tasks ✅\n"
         f"• Stay focused and beat distractions 🎯\n"
         f"• Break down big goals into steps 🪜\n\n"
-        f"Just talk to me like you would a real assistant — what's on your plate today?"
+        f"Send me a text or a voice note — what's on your plate today?"
     )
 
 
@@ -68,44 +94,53 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start — Reset and start fresh\n"
         "/clear — Clear our conversation history\n"
         "/help — Show this message\n\n"
-        "Or just message me normally — tell me what you need to get done today, and I'll help you plan it."
+        "Send me a text or voice note and I'll help you plan and stay on track."
     )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    user_id = user.id
-    user_name = user.first_name or "there"
-    message_text = update.message.text
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    history = get_history(user_id)
-    history.append({"role": "user", "content": message_text})
-
-    if len(history) > 30:
-        history = history[-30:]
-        conversation_histories[user_id] = history
-
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT.format(name=user_name)}] + history,
-            max_tokens=1024,
-        )
-        assistant_message = response.choices[0].message.content
+        reply = await ask_ai(user.id, user.first_name or "there", update.message.text)
     except Exception as e:
         logger.error(f"Groq API error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
         return
 
-    history.append({"role": "assistant", "content": assistant_message})
+    await send_reply(update, reply)
 
-    if len(assistant_message) <= 4096:
-        await update.message.reply_text(assistant_message)
-    else:
-        for i in range(0, len(assistant_message), 4096):
-            await update.message.reply_text(assistant_message[i:i + 4096])
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        # Download voice note from Telegram
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        voice_bytes = await voice_file.download_as_bytearray()
+
+        # Transcribe with Groq Whisper
+        transcription = client.audio.transcriptions.create(
+            file=("voice.ogg", bytes(voice_bytes), "audio/ogg"),
+            model="whisper-large-v3-turbo",
+        )
+        text = transcription.text
+        logger.info(f"Transcribed: {text}")
+
+        # Show the user what was heard
+        await update.message.reply_text(f"🎙️ _{text}_", parse_mode="Markdown")
+
+        # Pass transcription to AI
+        reply = await ask_ai(user.id, user.first_name or "there", text)
+
+    except Exception as e:
+        logger.error(f"Voice error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
+        return
+
+    await send_reply(update, reply)
 
 
 def main() -> None:
@@ -120,6 +155,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     logger.info("Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
