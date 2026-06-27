@@ -1,5 +1,8 @@
 import os
+import json
 import logging
+import dateparser
+from datetime import datetime, timezone
 from groq import Groq
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -12,10 +15,11 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "UTC")  # e.g. "Africa/Lagos"
 
 client = Groq(api_key=GROQ_API_KEY)
 
-SYSTEM_PROMPT = """You are a sharp, warm personal assistant. Your job is to help the user stay organised, focused, and on top of their day.
+SYSTEM_PROMPT = """You are a sharp, warm personal assistant for {name}. Your job is to help them stay organised, focused, and on top of their day.
 
 You help with:
 - Planning and structuring their day into a clear schedule
@@ -23,15 +27,41 @@ You help with:
 - Breaking big goals into small, actionable steps
 - Prioritising what actually matters
 - Gently bringing them back on track when they seem scattered or distracted
+- Setting reminders when asked
 
 Your style:
 - Be concise and direct — cut the fluff
 - Warm but not overly enthusiastic
 - Use bullet points and structure when listing tasks or plans
 - Be proactive: if they mention a task or commitment, acknowledge it and work it into their plan
-- If they ask to plan their day, first ask what fixed commitments they have, then build a realistic schedule around those
+- If they ask to plan their day, first ask what fixed commitments they have, then build a realistic schedule
 
-You have memory within this conversation — refer back to tasks or plans mentioned earlier when relevant."""
+When the user asks to be reminded about something, always use the set_reminder function — never just say you'll remind them.
+Current time: {current_time}"""
+
+REMINDER_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Schedule a reminder message to be sent to the user at a specific time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reminder_text": {
+                        "type": "string",
+                        "description": "The reminder message to send the user, e.g. 'Take your medication'"
+                    },
+                    "remind_at": {
+                        "type": "string",
+                        "description": "When to send the reminder in natural language, e.g. 'tomorrow at 7am', 'in 30 minutes', 'tonight at 9pm'"
+                    }
+                },
+                "required": ["reminder_text", "remind_at"]
+            }
+        }
+    }
+]
 
 conversation_histories: dict[int, list] = {}
 
@@ -42,7 +72,22 @@ def get_history(user_id: int) -> list:
     return conversation_histories[user_id]
 
 
-async def ask_ai(user_id: int, user_name: str, message_text: str) -> str:
+async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    await context.bot.send_message(
+        chat_id=job.chat_id,
+        text=f"⏰ *Reminder:* {job.data}",
+        parse_mode="Markdown"
+    )
+
+
+async def ask_ai(
+    user_id: int,
+    user_name: str,
+    message_text: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int
+) -> str:
     history = get_history(user_id)
     history.append({"role": "user", "content": message_text})
 
@@ -50,22 +95,60 @@ async def ask_ai(user_id: int, user_name: str, message_text: str) -> str:
         history = history[-30:]
         conversation_histories[user_id] = history
 
+    current_time = datetime.now(timezone.utc).strftime("%A, %B %d %Y at %H:%M UTC")
+
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "system", "content": SYSTEM_PROMPT.format(name=user_name)}] + history,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT.format(name=user_name, current_time=current_time)}
+        ] + history,
         max_tokens=1024,
+        tools=REMINDER_TOOL,
+        tool_choice="auto"
     )
-    assistant_message = response.choices[0].message.content
+
+    message = response.choices[0].message
+
+    if message.tool_calls:
+        tool_call = message.tool_calls[0]
+        args = json.loads(tool_call.function.arguments)
+        reminder_text = args.get("reminder_text", "")
+        remind_at_str = args.get("remind_at", "")
+
+        remind_time = dateparser.parse(
+            remind_at_str,
+            settings={
+                "RETURN_AS_TIMEZONE_AWARE": True,
+                "PREFER_FUTURE_DATES": True,
+                "TIMEZONE": USER_TIMEZONE
+            }
+        )
+
+        if remind_time:
+            context.job_queue.run_once(
+                callback=reminder_callback,
+                when=remind_time,
+                chat_id=chat_id,
+                data=reminder_text,
+                name=f"reminder_{user_id}_{int(remind_time.timestamp())}"
+            )
+            formatted_time = remind_time.strftime("%-I:%M %p on %A, %B %d")
+            assistant_message = f"✅ Done! I'll remind you to *{reminder_text}* at {formatted_time}."
+        else:
+            assistant_message = "I couldn't understand that time. Try something like 'tomorrow at 7am' or 'in 30 minutes'."
+    else:
+        assistant_message = message.content
+
     history.append({"role": "assistant", "content": assistant_message})
     return assistant_message
 
 
 async def send_reply(update: Update, text: str) -> None:
     if len(text) <= 4096:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="Markdown")
     else:
         for i in range(0, len(text), 4096):
-            await update.message.reply_text(text[i:i + 4096])
+            await update.message.reply_text(text[i:i + 4096], parse_mode="Markdown")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,24 +161,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Plan your day 📅\n"
         f"• Track and organise your tasks ✅\n"
         f"• Stay focused and beat distractions 🎯\n"
-        f"• Break down big goals into steps 🪜\n\n"
-        f"Send me a text or a voice note — what's on your plate today?"
+        f"• Set reminders ⏰\n\n"
+        f"Send me a text or voice note — what's on your plate today?"
     )
 
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conversation_histories[update.effective_user.id] = []
-    await update.message.reply_text("Fresh start! 🧹 Conversation cleared. What are we working on?")
+    await update.message.reply_text("Fresh start! 🧹 Conversation cleared.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Here's what I can do:\n\n"
         "/start — Reset and start fresh\n"
-        "/clear — Clear our conversation history\n"
+        "/clear — Clear conversation history\n"
+        "/reminders — See your upcoming reminders\n"
         "/help — Show this message\n\n"
-        "Send me a text or voice note and I'll help you plan and stay on track."
+        "You can also just tell me naturally:\n"
+        "_'Remind me to call mum at 6pm'_\n"
+        "_'Wake me up at 7am tomorrow'_\n"
+        "_'Help me plan my day'_",
+        parse_mode="Markdown"
     )
+
+
+async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    jobs = context.job_queue.jobs()
+    user_jobs = [j for j in jobs if j.name and j.name.startswith(f"reminder_{user_id}_")]
+
+    if not user_jobs:
+        await update.message.reply_text("You have no upcoming reminders.")
+        return
+
+    lines = ["⏰ *Your upcoming reminders:*\n"]
+    for job in sorted(user_jobs, key=lambda j: j.next_t):
+        time_str = job.next_t.strftime("%-I:%M %p, %A %B %d")
+        lines.append(f"• {job.data} — _{time_str}_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,9 +208,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        reply = await ask_ai(user.id, user.first_name or "there", update.message.text)
+        reply = await ask_ai(
+            user.id, user.first_name or "there",
+            update.message.text, context, update.effective_chat.id
+        )
     except Exception as e:
-        logger.error(f"Groq API error: {e}")
+        logger.error(f"Error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
         return
 
@@ -117,11 +225,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        # Download voice note from Telegram
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
 
-        # Transcribe with Groq Whisper
         transcription = client.audio.transcriptions.create(
             file=("voice.ogg", bytes(voice_bytes), "audio/ogg"),
             model="whisper-large-v3-turbo",
@@ -129,12 +235,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text = transcription.text
         logger.info(f"Transcribed: {text}")
 
-        # Show the user what was heard
         await update.message.reply_text(f"🎙️ _{text}_", parse_mode="Markdown")
 
-        # Pass transcription to AI
-        reply = await ask_ai(user.id, user.first_name or "there", text)
-
+        reply = await ask_ai(
+            user.id, user.first_name or "there",
+            text, context, update.effective_chat.id
+        )
     except Exception as e:
         logger.error(f"Voice error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
@@ -145,15 +251,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def main() -> None:
     if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN environment variable is not set")
+        raise ValueError("TELEGRAM_TOKEN is not set")
     if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY environment variable is not set")
+        raise ValueError("GROQ_API_KEY is not set")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("reminders", list_reminders))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
