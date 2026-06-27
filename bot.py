@@ -33,7 +33,6 @@ Your style:
 
 You have memory within this conversation — refer back to tasks or plans mentioned earlier when relevant."""
 
-# Per-user conversation history (in-memory)
 conversation_histories: dict[int, list] = {}
 
 
@@ -46,9 +45,7 @@ def get_history(user_id: int) -> list:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     name = user.first_name or "there"
-
     conversation_histories[user.id] = []
-
     await update.message.reply_text(
         f"Hey {name}! 👋 I'm your personal assistant, powered by Claude.\n\n"
         f"I can help you:\n"
@@ -86,14 +83,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history = get_history(user_id)
     history.append({"role": "user", "content": message_text})
 
-    # Keep last 30 messages to stay within token limits
     if len(history) > 30:
         history = history[-30:]
         conversation_histories[user_id] = history
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=1024,
             system=SYSTEM_PROMPT.format(name=user_name),
             messages=history,
@@ -101,14 +97,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         assistant_message = response.content[0].text
     except Exception as e:
         logger.error(f"Claude API error: {e}")
-        await update.message.reply_text(
-            "Sorry, I ran into an issue reaching Claude. Try again in a moment."
-        )
+        await update.message.reply_text(f"⚠️ Error: {e}")
         return
 
     history.append({"role": "assistant", "content": assistant_message})
 
-    # Telegram max message length is 4096 chars — split if needed
     if len(assistant_message) <= 4096:
         await update.message.reply_text(assistant_message)
     else:
