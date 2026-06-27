@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 import dateparser
@@ -34,34 +35,15 @@ Your style:
 - Warm but not overly enthusiastic
 - Use bullet points and structure when listing tasks or plans
 - Be proactive: if they mention a task or commitment, acknowledge it and work it into their plan
-- If they ask to plan their day, first ask what fixed commitments they have, then build a realistic schedule
 
-When the user asks to be reminded about something, always use the set_reminder function — never just say you'll remind them.
+IMPORTANT — REMINDERS:
+If the user asks to be reminded about something, you MUST include this exact block at the very end of your response (after your normal reply), with no extra text after it:
+[REMINDER]{{"text": "what to remind them", "time": "when in natural language"}}[/REMINDER]
+
+Example: if the user says "remind me to drink water in 10 minutes", your response ends with:
+[REMINDER]{{"text": "Drink water", "time": "in 10 minutes"}}[/REMINDER]
+
 Current time: {current_time}"""
-
-REMINDER_TOOL = [
-    {
-        "type": "function",
-        "function": {
-            "name": "set_reminder",
-            "description": "Schedule a reminder message to be sent to the user at a specific time.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reminder_text": {
-                        "type": "string",
-                        "description": "The reminder message to send the user, e.g. 'Take your medication'"
-                    },
-                    "remind_at": {
-                        "type": "string",
-                        "description": "When to send the reminder in natural language, e.g. 'tomorrow at 7am', 'in 30 minutes', 'tonight at 9pm'"
-                    }
-                },
-                "required": ["reminder_text", "remind_at"]
-            }
-        }
-    }
-]
 
 conversation_histories: dict[int, list] = {}
 
@@ -70,6 +52,19 @@ def get_history(user_id: int) -> list:
     if user_id not in conversation_histories:
         conversation_histories[user_id] = []
     return conversation_histories[user_id]
+
+
+def extract_reminder(text: str):
+    """Extract reminder JSON block from AI response. Returns (clean_text, reminder_dict or None)."""
+    match = re.search(r'\[REMINDER\](.*?)\[/REMINDER\]', text, re.DOTALL)
+    if not match:
+        return text, None
+    try:
+        reminder = json.loads(match.group(1).strip())
+        clean_text = text[:match.start()].strip()
+        return clean_text, reminder
+    except json.JSONDecodeError:
+        return text, None
 
 
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,23 +98,20 @@ async def ask_ai(
             {"role": "system", "content": SYSTEM_PROMPT.format(name=user_name, current_time=current_time)}
         ] + history,
         max_tokens=1024,
-        tools=REMINDER_TOOL,
-        tool_choice="auto"
     )
 
-    message = response.choices[0].message
+    raw_message = response.choices[0].message.content
+    clean_message, reminder = extract_reminder(raw_message)
 
-    if message.tool_calls:
-        tool_call = message.tool_calls[0]
-        args = json.loads(tool_call.function.arguments)
-        reminder_text = args.get("reminder_text", "")
-        remind_at_str = args.get("remind_at", "")
+    if reminder:
+        remind_at_str = reminder.get("time", "")
+        reminder_text = reminder.get("text", "")
 
         remind_time = dateparser.parse(
             remind_at_str,
             settings={
                 "RETURN_AS_TIMEZONE_AWARE": True,
-                "PREFER_FUTURE_DATES": True,
+                "PREFER_DATES_FROM": "future",
                 "TIMEZONE": USER_TIMEZONE
             }
         )
@@ -132,15 +124,13 @@ async def ask_ai(
                 data=reminder_text,
                 name=f"reminder_{user_id}_{int(remind_time.timestamp())}"
             )
-            formatted_time = remind_time.strftime("%-I:%M %p on %A, %B %d")
-            assistant_message = f"✅ Done! I'll remind you to *{reminder_text}* at {formatted_time}."
+            formatted_time = remind_time.strftime("%I:%M %p on %A, %B %d").lstrip("0")
+            clean_message += f"\n\n✅ Reminder set for *{formatted_time}*."
         else:
-            assistant_message = "I couldn't understand that time. Try something like 'tomorrow at 7am' or 'in 30 minutes'."
-    else:
-        assistant_message = message.content
+            clean_message += "\n\n⚠️ I couldn't understand that time. Try something like 'tomorrow at 7am' or 'in 30 minutes'."
 
-    history.append({"role": "assistant", "content": assistant_message})
-    return assistant_message
+    history.append({"role": "assistant", "content": clean_message})
+    return clean_message
 
 
 async def send_reply(update: Update, text: str) -> None:
@@ -178,7 +168,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/clear — Clear conversation history\n"
         "/reminders — See your upcoming reminders\n"
         "/help — Show this message\n\n"
-        "You can also just tell me naturally:\n"
+        "Just talk to me naturally:\n"
         "_'Remind me to call mum at 6pm'_\n"
         "_'Wake me up at 7am tomorrow'_\n"
         "_'Help me plan my day'_",
@@ -197,7 +187,7 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     lines = ["⏰ *Your upcoming reminders:*\n"]
     for job in sorted(user_jobs, key=lambda j: j.next_t):
-        time_str = job.next_t.strftime("%-I:%M %p, %A %B %d")
+        time_str = job.next_t.strftime("%I:%M %p, %A %B %d").lstrip("0")
         lines.append(f"• {job.data} — _{time_str}_")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
