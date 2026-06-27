@@ -1,6 +1,6 @@
 import os
 import logging
-import google.generativeai as genai
+from groq import Groq
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -11,9 +11,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = Groq(api_key=GROQ_API_KEY)
 
 SYSTEM_PROMPT = """You are a sharp, warm personal assistant. Your job is to help the user stay organised, focused, and on top of their day.
 
@@ -47,7 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = user.first_name or "there"
     conversation_histories[user.id] = []
     await update.message.reply_text(
-        f"Hey {name}! 👋 I'm your personal assistant, powered by Gemini.\n\n"
+        f"Hey {name}! 👋 I'm your personal assistant.\n\n"
         f"I can help you:\n"
         f"• Plan your day 📅\n"
         f"• Track and organise your tasks ✅\n"
@@ -75,31 +75,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
+    user_name = user.first_name or "there"
     message_text = update.message.text
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     history = get_history(user_id)
+    history.append({"role": "user", "content": message_text})
+
+    if len(history) > 30:
+        history = history[-30:]
+        conversation_histories[user_id] = history
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=SYSTEM_PROMPT
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "system", "content": SYSTEM_PROMPT.format(name=user_name)}] + history,
+            max_tokens=1024,
         )
-        chat = model.start_chat(history=history)
-        response = chat.send_message(message_text)
-        assistant_message = response.text
-
-        history.append({"role": "user", "parts": [message_text]})
-        history.append({"role": "model", "parts": [assistant_message]})
-
-        if len(history) > 60:
-            conversation_histories[user_id] = history[-60:]
-
+        assistant_message = response.choices[0].message.content
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
+        logger.error(f"Groq API error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
         return
+
+    history.append({"role": "assistant", "content": assistant_message})
 
     if len(assistant_message) <= 4096:
         await update.message.reply_text(assistant_message)
@@ -111,8 +111,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     if not TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN environment variable is not set")
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY environment variable is not set")
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY environment variable is not set")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
