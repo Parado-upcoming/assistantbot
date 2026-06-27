@@ -33,7 +33,6 @@ Your style:
 
 You have memory within this conversation — refer back to tasks or plans mentioned earlier when relevant."""
 
-# Per-user conversation history (Gemini format)
 conversation_histories: dict[int, list] = {}
 
 
@@ -84,18 +83,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-2.0-flash",
             system_instruction=SYSTEM_PROMPT
         )
         chat = model.start_chat(history=history)
         response = chat.send_message(message_text)
         assistant_message = response.text
 
-        # Save updated history (Gemini format uses "user" and "model")
         history.append({"role": "user", "parts": [message_text]})
         history.append({"role": "model", "parts": [assistant_message]})
 
-        # Keep last 30 exchanges
         if len(history) > 60:
             conversation_histories[user_id] = history[-60:]
 
