@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "UTC")  # e.g. "Africa/Lagos"
+USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "UTC")
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -55,7 +55,6 @@ def get_history(user_id: int) -> list:
 
 
 def extract_reminder(text: str):
-    """Extract reminder JSON block from AI response. Returns (clean_text, reminder_dict or None)."""
     match = re.search(r'\[REMINDER\](.*?)\[/REMINDER\]', text, re.DOTALL)
     if not match:
         return text, None
@@ -134,11 +133,19 @@ async def ask_ai(
 
 
 async def send_reply(update: Update, text: str) -> None:
-    if len(text) <= 4096:
-        await update.message.reply_text(text, parse_mode="Markdown")
-    else:
-        for i in range(0, len(text), 4096):
-            await update.message.reply_text(text[i:i + 4096], parse_mode="Markdown")
+    try:
+        if len(text) <= 4096:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        else:
+            for i in range(0, len(text), 4096):
+                await update.message.reply_text(text[i:i + 4096], parse_mode="Markdown")
+    except Exception:
+        # Fallback to plain text if Markdown fails
+        if len(text) <= 4096:
+            await update.message.reply_text(text)
+        else:
+            for i in range(0, len(text), 4096):
+                await update.message.reply_text(text[i:i + 4096])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -202,12 +209,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user.id, user.first_name or "there",
             update.message.text, context, update.effective_chat.id
         )
+        await send_reply(update, reply)
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
-        return
-
-    await send_reply(update, reply)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -231,12 +236,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user.id, user.first_name or "there",
             text, context, update.effective_chat.id
         )
+        await send_reply(update, reply)
+
     except Exception as e:
         logger.error(f"Voice error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
-        return
-
-    await send_reply(update, reply)
 
 
 def main() -> None:
