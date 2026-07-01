@@ -1,0 +1,107 @@
+# Telegram Personal Assistant Bot — Setup Guide
+
+A personal assistant bot powered by Groq AI (free). Supports text, voice notes, and reminders.
+Setup takes about 15 minutes.
+
+---
+
+## What You'll Need
+
+- A Telegram account
+- A free Groq API key (no credit card)
+- A free Railway account (for hosting)
+- A GitHub account (to deploy from)
+
+---
+
+## Step 1 — Create Your Telegram Bot
+
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot`
+3. Enter a display name, e.g. `My Assistant`
+4. Enter a username ending in `bot`, e.g. `myassistant_bot`
+5. Copy the **Bot Token** — looks like: `7123456789:AAFxxxxxxxxxxxx`
+
+---
+
+## Step 2 — Get Your Free Groq API Key
+
+1. Go to **console.groq.com** and sign up (free, no credit card)
+2. Click **API Keys → Create API Key**
+3. Copy the key
+
+---
+
+## Step 3 — Upload Files to GitHub
+
+1. Create a GitHub account at **github.com** if you don't have one
+2. Create a new repository — call it `telegram-assistant`
+3. Upload these 3 files into the repo:
+   - `bot.py`
+   - `requirements.txt`
+   - `Procfile`
+
+---
+
+## Step 4 — Deploy on Railway
+
+1. Go to **railway.app** and sign up (free)
+2. Click **New Project → Deploy from GitHub repo**
+3. Select your `telegram-assistant` repo
+4. Once imported, go to your project → **Variables** tab
+5. Add these environment variables:
+
+| Variable | Value |
+|----------|-------|
+| `TELEGRAM_TOKEN` | Your token from BotFather |
+| `GROQ_API_KEY` | Your Groq API key |
+| `USER_TIMEZONE` | Your timezone, e.g. `Africa/Lagos` |
+
+> For other timezones, search "tz database name" for your city — e.g. `America/New_York`, `Europe/London`, `Asia/Dubai`
+
+6. Railway will deploy automatically. Wait ~1 minute.
+
+---
+
+## Step 5 — Test It
+
+1. Open Telegram, search for your bot's username
+2. Press **Start** or type `/start`
+3. Try saying: *"Help me plan my day"*
+4. Try a reminder: *"Remind me to drink water in 5 minutes"*
+5. Try a voice note 🎙️
+
+---
+
+## Commands
+
+| Command | What it does |
+|---------|-------------|
+| `/start` | Reset and start fresh |
+| `/clear` | Clear conversation history |
+| `/reminders` | See all upcoming reminders |
+| `/help` | Show available commands |
+
+---
+
+## Features
+
+- **Text chat** — talk naturally, get help planning your day and managing tasks
+- **Voice notes** — send a voice message, it transcribes and responds
+- **Reminders** — say "remind me to..." and it sets an alarm that pings you on Telegram
+- **Memory** — remembers context within your conversation
+
+---
+
+## Troubleshooting
+
+**Bot doesn't respond at all:**
+- Check Railway → your service → Logs tab for errors
+- Make sure all 3 environment variables are set correctly
+
+**Reminders not working:**
+- Make sure `USER_TIMEZONE` is set to a valid timezone name
+- Check Railway logs for `job_queue` errors
+
+**Voice notes not working:**
+- Voice transcription uses Groq's Whisper — same API key, no extra setup needed
